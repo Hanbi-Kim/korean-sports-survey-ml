@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Korean Sports Survey ML</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f8f9fa; color: #333; }
+    header {
+      background: linear-gradient(135deg, #1a5276, #2980b9);
+      color: white; padding: 60px 40px; text-align: center;
+    }
+    header h1 { font-size: 2rem; margin-bottom: 10px; }
+    header p { font-size: 1rem; opacity: 0.85; }
+    .badge { display: inline-block; background: rgba(255,255,255,0.2);
+      border-radius: 20px; padding: 4px 14px; font-size: 0.8rem; margin: 4px; }
+    .container { max-width: 960px; margin: 0 auto; padding: 40px 20px; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 30px 0; }
+    .status-card {
+      background: white; border-radius: 12px; padding: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06); text-align: center;
+    }
+    .status-card .emoji { font-size: 2rem; margin-bottom: 8px; }
+    .status-card h3 { font-size: 0.9rem; color: #555; margin-bottom: 4px; }
+    .status-card .tag {
+      display: inline-block; padding: 2px 10px; border-radius: 20px;
+      font-size: 0.75rem; font-weight: 600;
+    }
+    .tag.done { background: #d5f5e3; color: #1e8449; }
+    .tag.wip  { background: #fdebd0; color: #ca6f1e; }
+    .tag.todo { background: #eaecee; color: #7f8c8d; }
+    section { margin: 40px 0; }
+    section h2 { font-size: 1.3rem; color: #1a5276; margin-bottom: 16px;
+      padding-bottom: 8px; border-bottom: 2px solid #d6eaf8; }
+    .link-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .link-card {
+      background: white; border-radius: 10px; padding: 18px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.05); text-decoration: none; color: inherit;
+      border-left: 4px solid #2980b9; transition: transform 0.15s;
+    }
+    .link-card:hover { transform: translateY(-2px); }
+    .link-card h4 { font-size: 0.95rem; margin-bottom: 4px; }
+    .link-card p { font-size: 0.8rem; color: #7f8c8d; }
+    footer { text-align: center; padding: 30px; color: #aaa; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🏃 Korean Sports Survey ML</h1>
+  <p>국민체육실태조사(2016–2025) 기반 머신러닝 예측 모델</p>
+  <div style="margin-top:16px">
+    <span class="badge">Python 3.10+</span>
+    <span class="badge">XGBoost</span>
+    <span class="badge">SHAP</span>
+    <span class="badge">Plotly</span>
+  </div>
+</header>
+
+<div class="container">
+
+  <section>
+    <h2>📊 진행 현황</h2>
+    <div class="status-grid">
+      <div class="status-card">
+        <div class="emoji">📦</div>
+        <h3>데이터 수집</h3>
+        <span class="tag wip">진행 중</span>
+      </div>
+      <div class="status-card">
+        <div class="emoji">🧹</div>
+        <h3>데이터 전처리</h3>
+        <span class="tag todo">대기</span>
+      </div>
+      <div class="status-card">
+        <div class="emoji">🔍</div>
+        <h3>EDA</h3>
+        <span class="tag todo">대기</span>
+      </div>
+      <div class="status-card">
+        <div class="emoji">🤖</div>
+        <h3>ML 모델링</h3>
+        <span class="tag todo">대기</span>
+      </div>
+      <div class="status-card">
+        <div class="emoji">📈</div>
+        <h3>결과 시각화</h3>
+        <span class="tag todo">대기</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>📂 분석 리포트</h2>
+    <div class="link-grid">
+      <a class="link-card" href="notebooks/01_eda.html">
+        <h4>📓 EDA 노트북</h4>
+        <p>연도별 분포 및 트렌드 분석</p>
+      </a>
+      <a class="link-card" href="notebooks/02_preprocessing.html">
+        <h4>📓 전처리 노트북</h4>
+        <p>코드 통합 및 결측값 처리</p>
+      </a>
+      <a class="link-card" href="notebooks/03_modeling.html">
+        <h4>📓 모델링 노트북</h4>
+        <p>ML 실험 결과 및 SHAP 분석</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>🔗 링크</h2>
+    <div class="link-grid">
+      <a class="link-card" href="https://github.com/Hanbi-Kim/korean-sports-survey-ml" target="_blank">
+        <h4>GitHub 레포</h4>
+        <p>소스 코드 및 데이터 파이프라인</p>
+      </a>
+    </div>
+  </section>
+
+</div>
+<footer>
+  Korean Sports Survey ML · Hanbi Kim · 2025
+</footer>
+</body>
+</html>
