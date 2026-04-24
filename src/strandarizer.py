@@ -1,411 +1,407 @@
 """
-국민생활체육조사 통합 데이터 표준화 스크립트
+국민생활체육조사 연도별 데이터 표준화 (2016~2024)
+==================================================
+프로젝트 구조:
+    korean-sports-survey-ml/
+    ├── data/
+    │   ├── 1_raw/
+    │   ├── 2_codebook/
+    │   ├── 4_mapping_table/
+    │   └── 5_processed/
+    └── src/
+        └── strandarizer.py   ← 이 파일
 
-입력 : data/processed/master.csv
-출력 : data/processed/master_standardized.csv
-      data/processed/standardize_report.txt  (변환 내역 리포트)
-
-단계:
-  1. 결측치 비율이 높은 컬럼 제거
-  2. 수치형 변환
-  3. 지역 코드 통일 (CODE3)
-  4. 연령 표준화 (AGE: 코드 → 실제 나이)
-  5. 기타 카테고리 정제
-
-실행: python src/standardize.py
+사용법 (프로젝트 루트에서 실행):
+    python src/strandarizer.py --year 2023
+    python src/strandarizer.py --year 2021 2022 2023
+    python src/strandarizer.py              # 전체
 """
 
-import pandas as pd
-import numpy as np
+import argparse
 import re
+import sys
 from pathlib import Path
 
-IN_PATH  = Path("data/processed/master.csv")
-OUT_PATH = Path("data/processed/master_standardized.csv")
-RPT_PATH = Path("data/processed/standardize_report.txt")
+import numpy as np
+import pandas as pd
 
-# ── 설정 ──────────────────────────────────────────────────────────────────────
-MISSING_DROP_THRESHOLD = 0.9   # 결측률 90% 이상 컬럼 제거
-                                # (실제 전체 데이터 기준으로 조정 권장)
+# ──────────────────────────────────────────────────────
+# 경로
+# ──────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent.parent  # src/ 기준 2단계 위 = 프로젝트 루트
+RAW_DIR  = BASE_DIR / "data" / "1_raw"
+MAP_DIR  = BASE_DIR / "data" / "4_mapping_table"
+CB_FILE  = BASE_DIR / "data" / "2_codebook" / "2025_codebook.xlsx"
+OUT_DIR  = BASE_DIR / "data" / "5_processed"
+REF_CSV  = OUT_DIR  / "survey_2025_standardized.csv"
 
-report_lines = []
-def log(msg=""):
-    print(msg)
-    report_lines.append(msg)
+HEADER_MAP = {
+    2016: 0, 2017: 0,
+    2018: 1, 2019: 1, 2020: 1, 2021: 1, 2022: 1,
+    2023: 2, 2024: 1,
+}
 
+# ──────────────────────────────────────────────────────
+# 시도 관련 상수
+# ──────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1. 결측 컬럼 제거
-# ══════════════════════════════════════════════════════════════════════════════
-def step1_drop_missing(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 1.  결측치 과다 컬럼 제거")
-    log("─"*60)
+# 2016/2018/2021/2022: AREA = 2자리 코드 (11, 21, 22 ...)
+AREA_2DIGIT = {
+    "11":"서울특별시", "21":"부산광역시", "22":"대구광역시",
+    "23":"인천광역시", "24":"광주광역시", "25":"대전광역시",
+    "26":"울산광역시", "29":"세종특별자치시","31":"경기도",
+    "32":"강원특별자치도","33":"충청북도","34":"충청남도",
+    "35":"전라북도","36":"전라남도","37":"경상북도",
+    "38":"경상남도","39":"제주특별자치도",
+}
 
-    miss_rate = df.isna().mean()
-    drop_cols = miss_rate[miss_rate >= MISSING_DROP_THRESHOLD].index.tolist()
+# 2017: AREA = 1자리 코드 (1~17)
+AREA_1DIGIT = {
+    "1":"서울특별시",  "2":"부산광역시",  "3":"대구광역시",
+    "4":"인천광역시",  "5":"광주광역시",  "6":"대전광역시",
+    "7":"울산광역시",  "8":"세종특별자치시","9":"경기도",
+    "10":"강원특별자치도","11":"충청북도","12":"충청남도",
+    "13":"전라북도","14":"전라남도","15":"경상북도",
+    "16":"경상남도","17":"제주특별자치도",
+}
 
-    log(f"기준 : 결측률 {MISSING_DROP_THRESHOLD*100:.0f}% 이상")
-    log(f"제거 : {len(drop_cols)}개 컬럼")
-    log(f"유지 : {len(df.columns) - len(drop_cols)}개 컬럼")
+# 2019: 시도 "01. 서울특별시" → 표준명
+SIDO_PREFIX = {
+    "01":"서울특별시","02":"부산광역시","03":"대구광역시",
+    "04":"인천광역시","05":"광주광역시","06":"대전광역시",
+    "07":"울산광역시","08":"세종특별자치시","09":"경기도",
+    "10":"강원특별자치도","11":"충청북도","12":"충청남도",
+    "13":"전라북도","14":"전라남도","15":"경상북도",
+    "16":"경상남도","17":"제주특별자치도",
+}
 
-    if drop_cols:
-        log("\n제거된 컬럼 목록:")
-        for c in drop_cols:
-            log(f"  {c:30s}  결측 {miss_rate[c]*100:.1f}%")
-
-    return df.drop(columns=drop_cols)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2. 수치형 변환
-# ══════════════════════════════════════════════════════════════════════════════
-NUM_COLS = [
-    "SEX", "AGE", "YEAR", "MON",
-    "Q1", "Q2", "Q3", "Q4",
-    "Q5_1", "Q5_2", "Q5_3", "Q5_4",
-    "Q6_1", "Q6_2", "Q6_3",
-    "Q7", "Q16",
-    "DQ1_1", "DQ1_2", "DQ2_1", "DQ2_2", "DQ2_3",
-    "DQ3", "DQ4", "DQ4_1",
+# 2020: SQ5_1_TEXT 자유텍스트 정규화
+REGION_RE = [
+    (r"서울",                  "서울특별시"),
+    (r"부산",                  "부산광역시"),
+    (r"대구",                  "대구광역시"),
+    (r"인천",                  "인천광역시"),
+    (r"광주",                  "광주광역시"),
+    (r"대전",                  "대전광역시"),
+    (r"울산",                  "울산광역시"),
+    (r"세종",                  "세종특별자치시"),
+    (r"수원|성남|고양|용인|부천|안산|화성|안양|경기",  "경기도"),
+    (r"강원",                  "강원특별자치도"),
+    (r"청주|충북|충청북",       "충청북도"),
+    (r"천안|아산|충남|충청남",  "충청남도"),
+    (r"전주|익산|전북|전라북",  "전라북도"),
+    (r"순천|목포|전남|전라남",  "전라남도"),
+    (r"포항|경주|경북|경상북",  "경상북도"),
+    (r"창원|김해|경남|경상남",  "경상남도"),
+    (r"제주",                  "제주특별자치도"),
 ]
 
-def step2_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 2.  수치형 변환")
-    log("─"*60)
-    converted = []
-    for col in NUM_COLS:
-        if col in df.columns:
-            before = df[col].dtype
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            converted.append(f"  {col:15s}  {str(before):10s} → {str(df[col].dtype)}")
-    log("\n".join(converted))
+# ──────────────────────────────────────────────────────
+# 코드북에 레이블 없는 변수 → 하드코딩
+# ──────────────────────────────────────────────────────
+HARD_LABELS = {
+    "SEX": {1:"남성", 2:"여성"},
+    "HTYPE": {1:"아파트", 2:"아파트 외"},
+    "APT":   {1:"아파트", 2:"아파트 외"},
+}
+
+
+# ══════════════════════════════════════════════════════
+# 매핑 로드
+# ══════════════════════════════════════════════════════
+
+def load_mapping(map_file: Path, year: int):
+    df_var = pd.read_excel(map_file, sheet_name="변수_매핑", header=1)
+    rename_map, drop_cols = {}, set()
+    for _, row in df_var.iterrows():
+        c_src = str(row.iloc[0]).strip()
+        c_dst = str(row.iloc[3]).strip()
+        if not c_src or c_src == "nan": continue
+        if c_dst and c_dst != "nan": rename_map[c_src] = c_dst
+        else: drop_cols.add(c_src)
+
+    # 값_매핑 (header=0, 위치 기반)
+    df_val = pd.read_excel(map_file, sheet_name="값_매핑", header=0)
+    val_rules = {}
+    for _, row in df_val.iterrows():
+        c_src = str(row.iloc[0]).strip()
+        c_dst = str(row.iloc[1]).strip()
+        v_src = str(row.iloc[2]).strip()
+        v_dst = str(row.iloc[3]).strip()
+        if not c_src or c_src == "nan": continue
+        if not c_dst or c_dst == "nan": continue
+        if v_src in ("nan","(없음)","") or v_dst in ("nan","(없음)",""): continue
+        cur_col = rename_map.get(c_src, c_src)
+        val_rules.setdefault(cur_col, [])
+        val_rules[cur_col].append((v_src, v_dst))
+
+    # 연도별 지역 코드 변환
+    if year in (2016, 2018):
+        # AREA = 2자리 코드 (11, 21, 22 ...)
+        target = rename_map.get("AREA", "CODE3")
+        val_rules[target] = [(k, v) for k, v in AREA_2DIGIT.items()]
+
+    elif year in (2017, 2022):
+        # AREA = 1자리 코드 (1~17)
+        target = rename_map.get("AREA", "CODE3")
+        val_rules[target] = [(k, v) for k, v in AREA_1DIGIT.items()]
+
+    elif year == 2021:
+        # LOC1 = 1자리 코드 (1~17)
+        target = rename_map.get("LOC1", "CODE3")
+        val_rules[target] = [(k, v) for k, v in AREA_1DIGIT.items()]
+
+    elif year == 2024:
+        # 강원도 → 강원특별자치도
+        val_rules.setdefault("CODE3", [])
+        val_rules["CODE3"].append(("강원도", "강원특별자치도"))
+
+    return rename_map, drop_cols, val_rules
+
+
+# ══════════════════════════════════════════════════════
+# 코드북 로드
+# ══════════════════════════════════════════════════════
+
+def load_codebook(cb_file: Path):
+    df_cb = pd.read_excel(cb_file, sheet_name="코드정의")
+    code_map = {}
+    for _, row in df_cb.iterrows():
+        col       = str(row["변수코드"]).strip()
+        code_val  = str(row["코드값"]).strip()
+        label_val = str(row["코드레이블"]).strip()
+        if not col or col == "nan": continue
+        if code_val in ("(연속형/자유값)","(주관식)","(없음)","nan",""): continue
+        if not label_val or label_val == "nan": continue  # NaN 레이블 스킵
+        code_map.setdefault(col, {})
+        try:    code_map[col][int(float(code_val))] = label_val
+        except: pass
+        code_map[col][code_val] = label_val
+
+    # 하드코딩 레이블 추가 (코드북에 없는 것)
+    for col, mapping in HARD_LABELS.items():
+        if col not in code_map:
+            code_map[col] = {}
+        for k, v in mapping.items():
+            code_map[col][k] = v
+            code_map[col][str(k)] = v
+
+    return code_map
+
+
+# ══════════════════════════════════════════════════════
+# 연도별 전용 전처리
+# ══════════════════════════════════════════════════════
+
+def preprocess(df: pd.DataFrame, year: int) -> pd.DataFrame:
+
+    if year == 2019:
+        # BIRTH (YYYYMM) → YEAR + MON
+        if "BIRTH" in df.columns:
+            birth_str = df["BIRTH"].astype(str).str.strip().str.zfill(6)
+            valid = birth_str.str.len() == 6
+            df["YEAR"] = pd.to_numeric(birth_str.where(valid).str[:4], errors="coerce")
+            df["MON"]  = pd.to_numeric(birth_str.where(valid).str[4:6], errors="coerce")
+            df = df.drop(columns=["BIRTH"])
+            print(f"  BIRTH 분리 완료 (비정상값 {(~valid).sum()}건 NaN)")
+
+        # 시도 "01. 서울특별시" → "서울특별시"
+        if "시도" in df.columns:
+            def norm_sido(v):
+                s = str(v).strip()
+                m = re.match(r'^(\d{2})[.\s]', s)
+                return SIDO_PREFIX.get(m.group(1), s) if m else s
+            df["시도"] = df["시도"].apply(norm_sido)
+
+        # 동읍면부 "1. 동부" → "동부"
+        if "동읍면부" in df.columns:
+            lmap = {"1. 동부": "동부", "2. 읍면부": "읍/면부"}
+            df["동읍면부"] = df["동읍면부"].map(lambda x: lmap.get(str(x).strip(), x))
+
+    elif year == 2020:
+        # SQ7 (YYYYMM) → YEAR + MON
+        if "SQ7" in df.columns:
+            sq7 = df["SQ7"].astype(str).str.strip().str.zfill(6)
+            df["YEAR"] = pd.to_numeric(sq7.str[:4], errors="coerce")
+            df["MON"]  = pd.to_numeric(sq7.str[4:6], errors="coerce")
+            df = df.drop(columns=["SQ7"])
+            print("  SQ7 분리 완료")
+
+        # SQ5_1_TEXT 자유텍스트 → 표준 시도명
+        if "SQ5_1_TEXT" in df.columns:
+            def norm_region(v):
+                if pd.isna(v): return v
+                s = str(v).strip()
+                for pat, name in REGION_RE:
+                    if re.search(pat, s): return name
+                return v
+            before = df["SQ5_1_TEXT"].copy()
+            df["SQ5_1_TEXT"] = df["SQ5_1_TEXT"].apply(norm_region)
+            changed = (before.astype(str) != df["SQ5_1_TEXT"].astype(str)).sum()
+            unmatched = df.loc[
+                ~df["SQ5_1_TEXT"].isin([v for _, v in REGION_RE]), "SQ5_1_TEXT"
+            ].dropna().unique()
+            print(f"  SQ5_1_TEXT 정규화: {changed:,}건"
+                  + (f" / ⚠️ 미매칭: {list(unmatched[:5])}" if len(unmatched) else ""))
+
+        # SQ1_1_TEXT 동/읍/면 → 동부/읍면부
+        if "SQ1_1_TEXT" in df.columns:
+            lmap = {"동": "동부", "읍": "읍/면부", "면": "읍/면부"}
+            df["SQ1_1_TEXT"] = df["SQ1_1_TEXT"].map(
+                lambda x: lmap.get(str(x).strip(), x)
+            )
+
     return df
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3. 지역 코드 통일 (CODE3 - 시도)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# 값 변환
+# ══════════════════════════════════════════════════════
 
-# 숫자 코드 → 표준 시도명 (2016/2017 AREA 코드 기준)
-REGION_CODE_MAP = {
-    11: "서울특별시",   21: "부산광역시",   22: "대구광역시",
-    23: "인천광역시",   24: "광주광역시",   25: "대전광역시",
-    26: "울산광역시",   29: "세종특별자치시",
-    31: "경기도",       32: "강원도",        33: "충청북도",
-    34: "충청남도",     35: "전라북도",      36: "전라남도",
-    37: "경상북도",     38: "경상남도",      39: "제주특별자치도",
-}
+def apply_val_rules(df: pd.DataFrame, val_rules: dict) -> int:
+    total = 0
+    for col, rules in val_rules.items():
+        if col not in df.columns: continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].astype(object)
+        for v_src, v_dst in rules:
+            mask = df[col].astype(str).str.strip() == str(v_src).strip()
+            try:
+                nv = int(v_src) if str(v_src).isdigit() else float(v_src)
+                mask = mask | (df[col] == nv)
+            except: pass
+            cnt = int(mask.sum())
+            if cnt > 0:
+                df.loc[mask, col] = v_dst
+                total += cnt
+    return total
 
-# 텍스트 변형 → 표준명
-REGION_TEXT_MAP = {
-    # 서울
-    "서울": "서울특별시",
-    "서울특별시": "서울특별시",
-    # 부산
-    "부산": "부산광역시",
-    "부산광역시": "부산광역시",
-    # 대구
-    "대구": "대구광역시",
-    "대구광역시": "대구광역시",
-    # 인천
-    "인천": "인천광역시",
-    "인천광역시": "인천광역시",
-    # 광주
-    "광주": "광주광역시",
-    "광주광역시": "광주광역시",
-    # 대전
-    "대전": "대전광역시",
-    "대전광역시": "대전광역시",
-    # 울산
-    "울산": "울산광역시",
-    "울산광역시": "울산광역시",
-    # 세종
-    "세종": "세종특별자치시",
-    "세종특별자치시": "세종특별자치시",
-    # 경기
-    "경기": "경기도",
-    "경기도": "경기도",
-    # 강원
-    "강원": "강원도",
-    "강원도": "강원도",
-    "강원특별자치도": "강원도",
-    # 충북
-    "충북": "충청북도",
-    "충청북도": "충청북도",
-    # 충남
-    "충남": "충청남도",
-    "충청남도": "충청남도",
-    # 전북
-    "전북": "전라북도",
-    "전라북도": "전라북도",
-    "전북특별자치도": "전라북도",
-    # 전남
-    "전남": "전라남도",
-    "전라남도": "전라남도",
-    # 경북
-    "경북": "경상북도",
-    "경상북도": "경상북도",
-    # 경남
-    "경남": "경상남도",
-    "경상남도": "경상남도",
-    # 제주
-    "제주": "제주특별자치도",
-    "제주특별자치도": "제주특별자치도",
-    "제주도": "제주특별자치도",
-}
 
-def normalize_region(val):
-    """단일 지역값 정규화"""
-    if pd.isna(val):
-        return np.nan
-    s = str(val).strip()
+def apply_codebook(df: pd.DataFrame, code_map: dict) -> int:
+    total = 0
+    for col, mapping in code_map.items():
+        if col not in df.columns: continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].astype(object)
+        before = df[col].copy()
+        df[col] = df[col].map(
+            lambda x: mapping.get(x, mapping.get(str(x).strip(), x))
+        )
+        total += (before.astype(str) != df[col].astype(str)).sum()
+    return total
 
-    # 숫자 코드 처리 ("11", "21" 등)
+
+# ══════════════════════════════════════════════════════
+# 메인 처리
+# ══════════════════════════════════════════════════════
+
+def standardize(year: int) -> bool:
+    raw_file = RAW_DIR / f"DATA_{year}년 국민생활체육조사.xlsx"
+    map_file = MAP_DIR / f"{year}_mapping.xlsx"
+
+    if not raw_file.exists():
+        print(f"  ⚠️  원본 파일 없음: {raw_file.name}"); return False
+    if not map_file.exists():
+        print(f"  ⚠️  매핑 파일 없음: {map_file.name}"); return False
+
     try:
-        code = int(float(s))
-        if code in REGION_CODE_MAP:
-            return REGION_CODE_MAP[code]
-    except (ValueError, TypeError):
-        pass
+        # 매핑 로드
+        rename_map, drop_cols, val_rules = load_mapping(map_file, year)
+        print(f"  매핑  : 리네임 {len(rename_map)}개 / 제거 {len(drop_cols)}개 / "
+              f"값변환 {len(val_rules)}컬럼({sum(len(v) for v in val_rules.values())}건)")
 
-    # "01. 서울특별시" 형태 → "서울특별시"
-    cleaned = re.sub(r"^\d+\.\s*", "", s).strip()
+        # 코드북 로드
+        code_map = load_codebook(CB_FILE)
+        print(f"  코드북: {len(code_map)}개 컬럼 / "
+              f"{sum(len(v) for v in code_map.values())}개 레이블")
 
-    # 텍스트 매핑
-    if cleaned in REGION_TEXT_MAP:
-        return REGION_TEXT_MAP[cleaned]
+        # 원본 로드
+        header = HEADER_MAP.get(year, 1)
+        df = pd.read_excel(raw_file, header=header)
+        if str(df.iloc[0, 0]).strip() == "ID":
+            df = df.iloc[1:].reset_index(drop=True)
+        print(f"  원본  : {df.shape[0]:,}행 × {df.shape[1]}열  (header={header})")
 
-    # 부분 일치 (앞 2글자로 시도 추정)
-    for key, std in REGION_TEXT_MAP.items():
-        if len(cleaned) >= 2 and cleaned[:2] == key[:2]:
-            return std
+        # 연도별 전처리
+        df = preprocess(df, year)
 
-    return cleaned  # 매핑 실패 시 정제된 텍스트 반환
+        # 컬럼 제거 & 리네임
+        drop_cols.discard("BIRTH")
+        drop_cols.discard("SQ7")
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+        df = df.rename(columns=rename_map)
+        df = df.loc[:, ~df.columns.duplicated()]
 
-def step3_region(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 3.  지역 코드 통일 (CODE3 - 시도)")
-    log("─"*60)
+        # 값 변환
+        changed_diff  = apply_val_rules(df, val_rules)
+        changed_label = apply_codebook(df, code_map)
+        print(f"  값변환: {changed_diff:,}건 / 레이블: {changed_label:,}건")
 
-    if "CODE3" not in df.columns:
-        log("  CODE3 컬럼 없음, 스킵")
-        return df
+        # 2025 컬럼 순서
+        if REF_CSV.exists():
+            cols_ref = [c for c in pd.read_csv(REF_CSV, nrows=0).columns if c != "연도"]
+            ordered  = [c for c in cols_ref if c in df.columns]
+            extra    = [c for c in df.columns if c not in cols_ref]
+            df = df[ordered + extra]
+            if extra:
+                print(f"  ⚠️  {year}에만 있는 컬럼 ({len(extra)}개): {extra[:5]}")
 
-    # 2022년 CODE3는 읍면동 구분(동부/읍면부)이 잘못 매핑됨 → NaN 처리
-    mask_2022_wrong = (df["SURVEY_YEAR"] == 2022) & df["CODE3"].str.contains("동부|읍면", na=False)
-    if mask_2022_wrong.sum() > 0:
-        df.loc[mask_2022_wrong, "CODE3"] = np.nan
-        log(f"  2022년 CODE3 오매핑 → NaN: {mask_2022_wrong.sum()}건")
+        # 저장
+        df.insert(0, "연도", year)
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_csv = OUT_DIR / f"survey_{year}_standardized.csv"
+        df.to_csv(out_csv, index=False, encoding="utf-8-sig")
+        print(f"  저장  : {out_csv.name}  [{df.shape[0]:,}행 × {df.shape[1]}열]")
+        return True
 
-    before = df["CODE3"].value_counts(dropna=False)
-    df["CODE3"] = df["CODE3"].apply(normalize_region)
-    after  = df["CODE3"].value_counts(dropna=False)
-
-    log("\n변환 전:")
-    log(before.to_string())
-    log("\n변환 후:")
-    log(after.to_string())
-
-    return df
+    except Exception as e:
+        print(f"  ❌ 오류: {e}")
+        import traceback; traceback.print_exc()
+        return False
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 4. 연령 표준화
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# CLI
+# ══════════════════════════════════════════════════════
 
-# 2016년 AGE 코드 → 연령대 대표값 (중간값)
-AGE_CODE_MAP = {
-    1: 15,   # 10대
-    2: 25,   # 20대
-    3: 35,   # 30대
-    4: 45,   # 40대
-    5: 55,   # 50대
-    6: 65,   # 60대 이상
-}
-
-def step4_age(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 4.  연령 표준화")
-    log("─"*60)
-
-    if "AGE" not in df.columns:
-        log("  AGE 컬럼 없음, 스킵")
-        return df
-
-    age = df["AGE"].copy()
-    year_col = df["SURVEY_YEAR"]
-
-    # 2016/2017: AGE는 연령대 코드 (1~6)
-    # → 중간값으로 대체하고 AGE_GROUP 컬럼 추가
-    mask_code = year_col.isin([2016, 2017]) & age.notna()
-
-    # 실제 나이인지 코드인지 구분: 1~6 범위면 코드
-    possible_code = mask_code & age.between(1, 6)
-
-    if possible_code.sum() > 0:
-        df.loc[possible_code, "AGE"] = age[possible_code].map(AGE_CODE_MAP)
-        log(f"  2016/2017 연령대 코드 → 대표값 변환: {possible_code.sum()}건")
-        log(f"  (1=10대→15, 2=20대→25, 3=30대→35, 4=40대→45, 5=50대→55, 6=60대→65)")
-
-    # 출생연도(YEAR)로 실제 나이 보완 (AGE가 NaN인 경우)
-    if "YEAR" in df.columns:
-        year_vals = pd.to_numeric(df["YEAR"], errors="coerce")
-        # 유효한 출생연도 범위: 1920~2015
-        valid_birth = year_vals.between(1920, 2015)
-        missing_age = df["AGE"].isna() & valid_birth
-
-        if missing_age.sum() > 0:
-            df.loc[missing_age, "AGE"] = (
-                df.loc[missing_age, "SURVEY_YEAR"] - year_vals[missing_age]
-            ).astype("Int64")
-            log(f"\n  출생연도로 AGE 보완: {missing_age.sum()}건")
-
-    # AGE 이상값 제거 (10세 미만, 100세 초과)
-    age_num = pd.to_numeric(df["AGE"], errors="coerce")
-    invalid = age_num.notna() & ~age_num.between(10, 100)
-    if invalid.sum() > 0:
-        df.loc[invalid, "AGE"] = np.nan
-        log(f"\n  AGE 이상값 제거 (10세 미만 / 100세 초과): {invalid.sum()}건")
-
-    # AGE_GROUP 파생변수 생성
-    age_num = pd.to_numeric(df["AGE"], errors="coerce")
-    df["AGE_GROUP"] = pd.cut(
-        age_num,
-        bins=[0, 19, 29, 39, 49, 59, 69, 120],
-        labels=["10대", "20대", "30대", "40대", "50대", "60대", "70대이상"],
+def main():
+    parser = argparse.ArgumentParser(description="국민생활체육조사 연도별 표준화")
+    parser.add_argument(
+        "--year", type=int, nargs="+",
+        help="처리할 연도 (예: --year 2023 / --year 2021 2022 2023 / 미입력 시 전체)"
     )
+    args = parser.parse_args()
 
-    log("\n  AGE_GROUP 분포:")
-    log(df["AGE_GROUP"].value_counts().sort_index().to_string())
+    if args.year:
+        target_years = sorted(args.year)
+    else:
+        target_years = sorted([
+            int(f.stem.replace("_mapping", ""))
+            for f in MAP_DIR.glob("*_mapping.xlsx")
+            if f.stem.replace("_mapping", "").isdigit()
+            and int(f.stem.replace("_mapping", "")) != 2025
+        ])
+        if not target_years:
+            print("❌ 매핑 파일 없음. --year 로 연도를 직접 지정하세요.")
+            sys.exit(1)
+        print(f"처리 대상: {target_years}\n")
 
-    return df
+    results = {}
+    for year in target_years:
+        print(f"\n{'='*50}")
+        print(f"[{year}] 표준화 시작")
+        print(f"{'='*50}")
+        results[year] = standardize(year)
 
+    print(f"\n{'='*50}")
+    print("결과 요약")
+    print(f"{'='*50}")
+    for year in sorted(results):
+        print(f"  {year}: {'✅ 완료' if results[year] else '❌ 실패'}")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 5. 기타 카테고리 정제
-# ══════════════════════════════════════════════════════════════════════════════
-def step5_other(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 5.  기타 카테고리 정제")
-    log("─"*60)
-
-    changes = []
-
-    # SEX: 1=남, 2=여 확인
-    if "SEX" in df.columns:
-        invalid_sex = ~df["SEX"].isin([1.0, 2.0, np.nan])
-        if invalid_sex.sum() > 0:
-            df.loc[invalid_sex, "SEX"] = np.nan
-            changes.append(f"  SEX 이상값 → NaN: {invalid_sex.sum()}건")
-        df["SEX_LABEL"] = df["SEX"].map({1.0: "남", 2.0: "여"})
-        changes.append("  SEX_LABEL 컬럼 추가 (1→남, 2→여)")
-
-    # YEAR (출생연도) 이상값 처리
-    if "YEAR" in df.columns:
-        yr = pd.to_numeric(df["YEAR"], errors="coerce")
-        invalid_yr = yr.notna() & ~yr.between(1920, 2015)
-        if invalid_yr.sum() > 0:
-            df.loc[invalid_yr, "YEAR"] = np.nan
-            changes.append(f"  YEAR 이상값 → NaN: {invalid_yr.sum()}건 (범위: 1920~2015)")
-
-    # DQ3 (월평균가구소득) 이상값 처리 (0~2000만원 범위 가정)
-    if "DQ3" in df.columns:
-        inc = pd.to_numeric(df["DQ3"], errors="coerce")
-        invalid_inc = inc.notna() & ~inc.between(0, 2000)
-        if invalid_inc.sum() > 0:
-            df.loc[invalid_inc, "DQ3"] = np.nan
-            changes.append(f"  DQ3(소득) 이상값 → NaN: {invalid_inc.sum()}건 (범위: 0~2000만원)")
-
-    # Q16 / Q7 범위 확인 (1~9)
-    for col in ["Q16", "Q7"]:
-        if col in df.columns:
-            val = pd.to_numeric(df[col], errors="coerce")
-            invalid = val.notna() & ~val.between(1, 9)
-            if invalid.sum() > 0:
-                df.loc[invalid, col] = np.nan
-                changes.append(f"  {col} 범위 초과 → NaN: {invalid.sum()}건")
-
-    # Q1 (건강상태) 범위 확인 (1~5)
-    if "Q1" in df.columns:
-        val = pd.to_numeric(df["Q1"], errors="coerce")
-        invalid = val.notna() & ~val.between(1, 5)
-        if invalid.sum() > 0:
-            df.loc[invalid, "Q1"] = np.nan
-            changes.append(f"  Q1 범위 초과 → NaN: {invalid.sum()}건")
-
-    log("\n".join(changes) if changes else "  변경사항 없음")
-
-    return df
+    if any(not v for v in results.values()):
+        sys.exit(1)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 6. 컬럼 순서 정리 및 최종 요약
-# ══════════════════════════════════════════════════════════════════════════════
-PRIORITY_COLS = [
-    "SURVEY_YEAR",
-    "SEX", "SEX_LABEL", "AGE", "AGE_GROUP", "YEAR", "MON",
-    "CODE3",  # 시도
-    "CODE4",  # 시군구
-    "CODE5",  # 읍면동
-    "APT",    # 주거유형
-    "Q1",     # 건강상태
-    "Q16",    # 규칙적 체육활동 참여 빈도  (핵심 타겟)
-    "Q7",     # 규칙적 체육활동 참여 주기
-    "DQ1_1",  # 최종학력
-    "DQ3",    # 월평균 가구소득
-    "DQ4",    # 직업유무
-]
-
-def step6_finalize(df: pd.DataFrame) -> pd.DataFrame:
-    log("\n" + "─"*60)
-    log("STEP 6.  컬럼 정리 및 최종 요약")
-    log("─"*60)
-
-    # 우선 컬럼을 앞으로, 나머지는 알파벳 순
-    priority = [c for c in PRIORITY_COLS if c in df.columns]
-    rest     = sorted([c for c in df.columns if c not in priority])
-    df       = df[priority + rest]
-
-    log(f"\n최종 shape: {df.shape}")
-    log(f"우선 컬럼 ({len(priority)}개): {priority}")
-
-    log("\n핵심 컬럼 결측률:")
-    key = [c for c in PRIORITY_COLS if c in df.columns]
-    miss = (df[key].isna().mean() * 100).round(1)
-    log(miss.to_string())
-
-    log("\n연도별 행 수:")
-    log(df["SURVEY_YEAR"].value_counts().sort_index().to_string())
-
-    return df
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    log("=" * 60)
-    log("  국민생활체육조사 데이터 표준화")
-    log("=" * 60)
-    log(f"입력: {IN_PATH}")
-
-    df = pd.read_csv(IN_PATH, dtype=str)
-    log(f"원본 shape: {df.shape}\n")
-
-    df = step1_drop_missing(df)
-    df = step2_numeric(df)
-    df = step3_region(df)
-    df = step4_age(df)
-    df = step5_other(df)
-    df = step6_finalize(df)
-
-    # 저장
-    df.to_csv(OUT_PATH, index=False, encoding="utf-8-sig")
-    log(f"\n✓ 저장 완료: {OUT_PATH}")
-    log(f"  파일 크기: {OUT_PATH.stat().st_size / 1024 / 1024:.1f} MB")
-
-    # 리포트 저장
-    RPT_PATH.write_text("\n".join(report_lines), encoding="utf-8")
-    log(f"✓ 리포트 저장: {RPT_PATH}")
+    main()
